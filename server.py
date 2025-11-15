@@ -3,14 +3,19 @@ from datetime import datetime
 
 app = Flask(__name__)
 
+# CHANGE THIS to something secret (do NOT commit a real secret in a public repo in the future;
+# but for now this is okay for testing)
+RESET_KEY = "changeme123"
+
 LATEST = None
-HISTORY = []  # in-memory; later you can switch to a file/DB
+HISTORY = []  # in-memory history; consider a DB/file later
 
 
 def parse_payload_text(text: str) -> dict:
     """
-    Adjust this later to match your payload.
-    For now, assume: 'lat,lon,alt,...'
+    Adjust this to match your payload format.
+    CURRENT ASSUMPTION: 'lat,lon,alt,...'
+    Example: "35.1234,-82.9876,1500,25.3,101325,3.7"
     """
     data = {}
     if not text:
@@ -25,7 +30,7 @@ def parse_payload_text(text: str) -> dict:
         if len(parts) >= 3:
             data["gps_alt"] = float(parts[2])
     except ValueError:
-        # not numeric? just ignore for now
+        # if not numeric, we just skip GPS parsing
         pass
 
     data["payload_parts"] = parts
@@ -40,10 +45,11 @@ def index():
 @app.route("/rockblock", methods=["POST"])
 def rockblock_in():
     """
-    This is what RockBLOCK will POST to.
-    Expected fields (form data):
+    RockBLOCK (Ground Control) will POST here.
+
+    Expected form fields:
       imei, momsn, transmit_time, iridium_latitude, iridium_longitude,
-      iridium_cep, data (hex)
+      iridium_cep, data (hex-encoded payload)
     """
     global LATEST, HISTORY
 
@@ -68,7 +74,7 @@ def rockblock_in():
         "data_hex": data_hex,
     }
 
-    # hex -> text
+    # Decode hex payload to text
     text = None
     if data_hex:
         try:
@@ -79,18 +85,20 @@ def rockblock_in():
 
     msg["data_text"] = text
 
-    # parse your own GPS/data from the text
+    # Parse GPS and other fields from the text payload
     if text:
         msg.update(parse_payload_text(text))
 
     HISTORY.append(msg)
     LATEST = msg
 
+    # RockBLOCK wants HTTP 200 to consider the delivery successful
     return "OK", 200
 
 
 @app.route("/api/latest", methods=["GET"])
 def api_latest():
+    """Return the latest message."""
     if not LATEST:
         return jsonify({"error": "no data yet"}), 404
     return jsonify(LATEST)
@@ -98,10 +106,30 @@ def api_latest():
 
 @app.route("/api/history", methods=["GET"])
 def api_history():
-    # last 100 messages
+    """Return the last 100 messages."""
     return jsonify(HISTORY[-100:])
 
 
+@app.route("/api/reset", methods=["POST"])
+def api_reset():
+    """
+    Clear all in-memory data for a new flight.
+    Requires ?key=RESET_KEY or form key=RESET_KEY
+    """
+    global LATEST, HISTORY
+
+    key = request.args.get("key") or request.form.get("key")
+    if key != RESET_KEY:
+        return jsonify({"error": "forbidden"}), 403
+
+    LATEST = None
+    HISTORY = []
+    return jsonify({
+        "status": "reset",
+        "time": datetime.utcnow().isoformat() + "Z"
+    }), 200
+
+
 if __name__ == "__main__":
-    # local testing only
+    # Local testing
     app.run(host="0.0.0.0", port=5000)
