@@ -1,13 +1,16 @@
-from flask import Flask, request, jsonify, Response
+#!/usr/bin/env python3
+import os
 from datetime import datetime, timezone
+from flask import Flask, request, jsonify, Response
 
 app = Flask(__name__)
 
-RESET_KEY = "changeme123"
+# Change this to something secret (do NOT commit real secrets to public repos)
+RESET_KEY = os.environ.get("RESET_KEY", "changeme123")
 
 LATEST = None
 HISTORY = []  # raw messages
-ROWS = []     # ground-station formatted rows (dicts)
+ROWS = []     # ground-station formatted rows
 
 # Ground station columns (in order)
 GS_COLUMNS = [
@@ -37,72 +40,64 @@ GS_COLUMNS = [
     "watch2_temp_C",
 ]
 
+
 def _to_float(x):
     try:
         if x is None:
             return None
-        x = str(x).strip()
-        if x == "":
+        s = str(x).strip()
+        if s == "":
             return None
-        return float(x)
+        return float(s)
     except Exception:
         return None
+
 
 def _to_int(x):
     try:
         if x is None:
             return None
-        x = str(x).strip()
-        if x == "":
+        s = str(x).strip()
+        if s == "":
             return None
-        return int(float(x))
+        return int(float(s))
     except Exception:
         return None
 
+
 def parse_mini_payload(text: str) -> dict:
     """
-    Parse: met_s,temp,hum,press,lat,lon,alt,roll,pitch,yaw,coinc
-    Returns typed fields where possible.
+    Parse text payload: met_s,temp,hum,press,lat,lon,alt,roll,pitch,yaw,coinc
+    Example:
+      "1768494357.622342,24.91,42.00,931.87,35.304470,-83.198311,182.10,5.00,2.52,0.00,13"
     """
     out = {}
     if not text:
         return out
 
     parts = [p.strip() for p in text.split(",")]
-
-    # Keep for debugging
     out["payload_parts"] = parts
 
     # Expected order
-    # 0 met_s (unix seconds)
-    # 1 temp C
-    # 2 hum %
-    # 3 press hPa
-    # 4 lat
-    # 5 lon
-    # 6 alt m
-    # 7 roll deg
-    # 8 pitch deg
-    # 9 yaw deg
-    # 10 coinc (count)
-    if len(parts) >= 1: out["met_s"] = _to_float(parts[0])
-    if len(parts) >= 2: out["temp_C"] = _to_float(parts[1])
-    if len(parts) >= 3: out["hum_pct"] = _to_float(parts[2])
-    if len(parts) >= 4: out["press_hPa"] = _to_float(parts[3])
-    if len(parts) >= 5: out["lat"] = _to_float(parts[4])
-    if len(parts) >= 6: out["lon"] = _to_float(parts[5])
-    if len(parts) >= 7: out["alt_m"] = _to_float(parts[6])
-    if len(parts) >= 8: out["roll_deg"] = _to_float(parts[7])
-    if len(parts) >= 9: out["pitch_deg"] = _to_float(parts[8])
+    if len(parts) >= 1:  out["met_s"] = _to_float(parts[0])
+    if len(parts) >= 2:  out["temp_C"] = _to_float(parts[1])
+    if len(parts) >= 3:  out["hum_pct"] = _to_float(parts[2])
+    if len(parts) >= 4:  out["press_hPa"] = _to_float(parts[3])
+    if len(parts) >= 5:  out["lat"] = _to_float(parts[4])
+    if len(parts) >= 6:  out["lon"] = _to_float(parts[5])
+    if len(parts) >= 7:  out["alt_m"] = _to_float(parts[6])
+    if len(parts) >= 8:  out["roll_deg"] = _to_float(parts[7])
+    if len(parts) >= 9:  out["pitch_deg"] = _to_float(parts[8])
     if len(parts) >= 10: out["yaw_deg"] = _to_float(parts[9])
     if len(parts) >= 11: out["coinc"] = _to_int(parts[10])
 
     return out
 
+
 def build_gs_row(parsed: dict) -> dict:
     """
     Build a ground-station row dict with EXACT GS_COLUMNS keys.
-    Leaves WATCH fields blank unless we decide to map something.
+    Leaves WATCH fields blank unless mapped.
     """
     row = {k: "" for k in GS_COLUMNS}
 
@@ -110,16 +105,19 @@ def build_gs_row(parsed: dict) -> dict:
 
     # timestamps
     if met_s is not None:
-        # Use met_s as unix time
         row["timestamp_unix_s"] = f"{float(met_s):.6f}"
         dt = datetime.fromtimestamp(float(met_s), tz=timezone.utc)
-        row["timestamp_iso"] = dt.replace(tzinfo=None).isoformat()  # match your example style (no Z)
-        row["gps_time_str"] = dt.strftime("%-H:%M:%S") if hasattr(dt, "strftime") else ""
+        # Match your example style: ISO without Z / tzinfo
+        row["timestamp_iso"] = dt.replace(tzinfo=None).isoformat()
+        # Your example "5:42:43" (no leading zero hour)
+        try:
+            row["gps_time_str"] = dt.strftime("%-H:%M:%S")
+        except Exception:
+            row["gps_time_str"] = dt.strftime("%H:%M:%S").lstrip("0")
     else:
-        # fallback: server receive time (UTC)
-        now = datetime.utcnow()
-        row["timestamp_iso"] = now.isoformat()
-        row["timestamp_unix_s"] = f"{now.replace(tzinfo=timezone.utc).timestamp():.6f}"
+        now = datetime.utcnow().replace(tzinfo=timezone.utc)
+        row["timestamp_unix_s"] = f"{now.timestamp():.6f}"
+        row["timestamp_iso"] = now.replace(tzinfo=None).isoformat()
 
     # ENV
     if parsed.get("temp_C") is not None:
@@ -145,12 +143,13 @@ def build_gs_row(parsed: dict) -> dict:
     if parsed.get("yaw_deg") is not None:
         row["ori_yaw_deg"] = f"{parsed['yaw_deg']:.2f}"
 
-    # Put coinc into an existing GS column so it doesn’t get lost
-    # (Change this mapping if you want it somewhere else.)
+    # Map coinc into an existing GS column so it’s not lost.
+    # Change this if you want a different destination.
     if parsed.get("coinc") is not None:
         row["watch1_event"] = str(parsed["coinc"])
 
     return row
+
 
 def row_to_tsv(row: dict, include_header: bool = True) -> str:
     header = "\t".join(GS_COLUMNS)
@@ -166,11 +165,9 @@ def index():
 @app.route("/rockblock", methods=["POST"])
 def rockblock_in():
     """
-    RockBLOCK (Ground Control) will POST here.
-
-    Expected fields (often form-encoded):
-      imei, momsn, transmit_time, iridium_latitude, iridium_longitude,
-      iridium_cep, data (hex payload)
+    Rock7 will POST here with fields like:
+      imei, momsn, transmit_time, iridium_latitude, iridium_longitude, iridium_cep, data
+    data is hex-encoded payload bytes.
     """
     global LATEST, HISTORY, ROWS
 
@@ -195,7 +192,7 @@ def rockblock_in():
         "data_hex": data_hex,
     }
 
-    # Decode hex payload to text
+    # Decode hex payload to UTF-8 text
     text = None
     if data_hex:
         try:
@@ -212,6 +209,15 @@ def rockblock_in():
 
     row = build_gs_row(parsed)
     msg["gs_row"] = row
+
+    # ---- Backwards-compatibility aliases for existing clients ----
+    # Your existing dashboard expects gps_lat/gps_lon/gps_alt at the top level.
+    if row.get("gps_lat"):
+        msg["gps_lat"] = row["gps_lat"]
+    if row.get("gps_lon"):
+        msg["gps_lon"] = row["gps_lon"]
+    if row.get("gps_alt_m"):
+        msg["gps_alt"] = row["gps_alt_m"]  # key alias
 
     HISTORY.append(msg)
     LATEST = msg
@@ -252,6 +258,7 @@ def api_history_tsv():
     except Exception:
         n = 100
     n = max(1, min(n, 5000))
+
     rows = ROWS[-n:]
     if not rows:
         return Response("no rows yet\n", mimetype="text/plain", status=404)
@@ -278,11 +285,10 @@ def api_reset():
     LATEST = None
     HISTORY = []
     ROWS = []
-    return jsonify({
-        "status": "reset",
-        "time": datetime.utcnow().isoformat() + "Z"
-    }), 200
+    return jsonify({"status": "reset", "time": datetime.utcnow().isoformat() + "Z"}), 200
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    # Render (and most PaaS) provides PORT
+    port = int(os.environ.get("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port)
