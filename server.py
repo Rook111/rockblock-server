@@ -1,4 +1,3 @@
-```python
 #!/usr/bin/env python3
 import os
 from datetime import datetime, timezone
@@ -6,14 +5,12 @@ from flask import Flask, request, jsonify, Response
 
 app = Flask(__name__)
 
-# Secret for /api/reset
 RESET_KEY = os.environ.get("RESET_KEY", "changeme123")
 
 LATEST = None
-HISTORY = []  # raw messages
-ROWS = []     # ground-station formatted rows
+HISTORY = []
+ROWS = []
 
-# Ground station columns (in order)
 GS_COLUMNS = [
     "timestamp_iso",
     "timestamp_unix_s",
@@ -68,9 +65,7 @@ def _to_int(x):
 
 def parse_mini_payload(text: str) -> dict:
     """
-    Parse text payload: met_s,temp,hum,press,lat,lon,alt,roll,pitch,yaw,coinc
-    Example:
-      "1768494357.622342,24.91,42.00,931.87,35.304470,-83.198311,182.10,5.00,2.52,0.00,13"
+    text: met_s,temp,hum,press,lat,lon,alt,roll,pitch,yaw,coinc
     """
     out = {}
     if not text:
@@ -79,7 +74,6 @@ def parse_mini_payload(text: str) -> dict:
     parts = [p.strip() for p in text.split(",")]
     out["payload_parts"] = parts
 
-    # Expected order
     if len(parts) >= 1:  out["met_s"] = _to_float(parts[0])
     if len(parts) >= 2:  out["temp_C"] = _to_float(parts[1])
     if len(parts) >= 3:  out["hum_pct"] = _to_float(parts[2])
@@ -100,7 +94,6 @@ def build_gs_row(parsed: dict) -> dict:
 
     met_s = parsed.get("met_s")
 
-    # timestamps
     if met_s is not None:
         row["timestamp_unix_s"] = f"{float(met_s):.6f}"
         dt = datetime.fromtimestamp(float(met_s), tz=timezone.utc)
@@ -114,7 +107,6 @@ def build_gs_row(parsed: dict) -> dict:
         row["timestamp_unix_s"] = f"{now.timestamp():.6f}"
         row["timestamp_iso"] = now.replace(tzinfo=None).isoformat()
 
-    # ENV
     if parsed.get("temp_C") is not None:
         row["env_temp_C"] = f"{parsed['temp_C']:.2f}"
     if parsed.get("hum_pct") is not None:
@@ -122,7 +114,6 @@ def build_gs_row(parsed: dict) -> dict:
     if parsed.get("press_hPa") is not None:
         row["env_press_hPa"] = f"{parsed['press_hPa']:.2f}"
 
-    # GPS
     if parsed.get("lat") is not None:
         row["gps_lat"] = f"{parsed['lat']:.6f}"
     if parsed.get("lon") is not None:
@@ -130,7 +121,6 @@ def build_gs_row(parsed: dict) -> dict:
     if parsed.get("alt_m") is not None:
         row["gps_alt_m"] = f"{parsed['alt_m']:.3f}"
 
-    # ORI
     if parsed.get("roll_deg") is not None:
         row["ori_roll_deg"] = f"{parsed['roll_deg']:.2f}"
     if parsed.get("pitch_deg") is not None:
@@ -138,7 +128,6 @@ def build_gs_row(parsed: dict) -> dict:
     if parsed.get("yaw_deg") is not None:
         row["ori_yaw_deg"] = f"{parsed['yaw_deg']:.2f}"
 
-    # Map coinc somewhere (using watch1_event)
     if parsed.get("coinc") is not None:
         row["watch1_event"] = str(parsed["coinc"])
 
@@ -158,35 +147,23 @@ def index():
 
 @app.route("/rockblock", methods=["POST"])
 def rockblock_in():
-    """
-    Rock7 will POST here with fields like:
-      imei, momsn, transmit_time, iridium_latitude, iridium_longitude, iridium_cep, data
-    data is hex-encoded payload bytes.
-    """
     global LATEST, HISTORY, ROWS
 
     payload = request.form or request.json or {}
 
-    imei = payload.get("imei")
-    momsn = payload.get("momsn")
-    tx_time = payload.get("transmit_time")
-    ir_lat = payload.get("iridium_latitude")
-    ir_lon = payload.get("iridium_longitude")
-    ir_cep = payload.get("iridium_cep")
     data_hex = payload.get("data")
 
     msg = {
         "received_at": datetime.utcnow().isoformat() + "Z",
-        "imei": imei,
-        "momsn": momsn,
-        "transmit_time": tx_time,
-        "iridium_latitude": ir_lat,
-        "iridium_longitude": ir_lon,
-        "iridium_cep": ir_cep,
+        "imei": payload.get("imei"),
+        "momsn": payload.get("momsn"),
+        "transmit_time": payload.get("transmit_time"),
+        "iridium_latitude": payload.get("iridium_latitude"),
+        "iridium_longitude": payload.get("iridium_longitude"),
+        "iridium_cep": payload.get("iridium_cep"),
         "data_hex": data_hex,
     }
 
-    # Decode hex payload to UTF-8 text
     text = None
     if data_hex:
         try:
@@ -197,25 +174,20 @@ def rockblock_in():
 
     msg["data_text"] = text
 
-    # Parse your payload
     parsed = parse_mini_payload(text or "")
     msg.update(parsed)
 
-    # ---- FIX: compatibility fields for clients that look for lat/lon at top-level ----
-    # Some clients mistakenly use iridium_latitude/longitude (often 0 or coarse),
-    # so we mirror your real GPS lat/lon/alt to common top-level keys too.
+    # FIX: mirror real GPS into common keys so clients don’t use Iridium lat/lon
     if parsed.get("lat") is not None:
         msg["gps_lat"] = parsed["lat"]
-        msg["lat"] = parsed["lat"]      # compatibility
+        msg["lat"] = parsed["lat"]
     if parsed.get("lon") is not None:
         msg["gps_lon"] = parsed["lon"]
-        msg["lon"] = parsed["lon"]      # compatibility
+        msg["lon"] = parsed["lon"]
     if parsed.get("alt_m") is not None:
         msg["gps_alt_m"] = parsed["alt_m"]
-        msg["alt"] = parsed["alt_m"]    # compatibility
-    # -----------------------------------------------------------------------------
+        msg["alt"] = parsed["alt_m"]
 
-    # Build ground-station row
     row = build_gs_row(parsed)
     msg["gs_row"] = row
 
@@ -247,11 +219,13 @@ def api_latest_tsv():
     return Response(row_to_tsv(ROWS[-1], include_header=True), mimetype="text/plain")
 
 
+@app.route("/api/history", methods=["GET"])
+def api_history():
+    return jsonify(HISTORY[-100:])
+
+
 @app.route("/api/history_tsv", methods=["GET"])
 def api_history_tsv():
-    """
-    TSV of last N rows. Example: /api/history_tsv?n=100
-    """
     try:
         n = int(request.args.get("n", "100"))
     except Exception:
@@ -266,11 +240,6 @@ def api_history_tsv():
     for r in rows:
         lines.append("\t".join(str(r.get(k, "")) for k in GS_COLUMNS))
     return Response("\n".join(lines) + "\n", mimetype="text/plain")
-
-
-@app.route("/api/history", methods=["GET"])
-def api_history():
-    return jsonify(HISTORY[-100:])
 
 
 @app.route("/api/reset", methods=["POST"])
@@ -288,7 +257,5 @@ def api_reset():
 
 
 if __name__ == "__main__":
-    # Render (and most PaaS) provides PORT
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
-```
